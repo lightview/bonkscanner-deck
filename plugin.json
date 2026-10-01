@@ -1,0 +1,17 @@
+{
+  "name": "BonkScanner Deck",
+  "author": "autolight",
+  "flags": [
+    "root"
+  ],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "megabonk",
+      "automation",
+      "root"
+    ],
+    "description": "Rerolls Megabonk maps until Moais, Microwaves, Shady Guys and other shrines match your target. Port of BonkScanner.",
+    "image": "https://opengraph.githubassets.com/1/lightview/bonkscanner-deck"
+  }
+}
