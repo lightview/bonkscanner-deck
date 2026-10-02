@@ -46,6 +46,7 @@ MAP_CONTROLLER_TYPE_INFO_OFFSET = 0x2F58E08
 MAP_GENERATION_CONTROLLER_TYPE_INFO_OFFSET = 0x2F59000
 MY_TIME_TYPE_INFO_OFFSET = 0x2F62398
 MY_TIME_PAUSED_OFFSET = 0x0
+MY_TIME_RUN_TIMER_OFFSET = 0x20
 CLASS_STATIC_FIELDS_OFFSET = 0xB8
 MAP_CONTROLLER_CURRENT_MAP_OFFSET = 0x10
 MAP_CONTROLLER_CURRENT_STAGE_OFFSET = 0x18
@@ -272,6 +273,13 @@ class GameClient:
     def is_paused(self) -> bool:
         fields = self._static_fields(MY_TIME_TYPE_INFO_OFFSET)
         return self.memory.read_u8(fields + MY_TIME_PAUSED_OFFSET) != 0
+
+    def get_clock(self) -> tuple[bool, float]:
+        """``(MyTime.paused, MyTime.runTimer)``; the timer only advances in play."""
+        fields = self._static_fields(MY_TIME_TYPE_INFO_OFFSET)
+        paused = self.memory.read_u8(fields + MY_TIME_PAUSED_OFFSET) != 0
+        timer = struct.unpack("<f", self.memory.read_bytes(fields + MY_TIME_RUN_TIMER_OFFSET, 4))[0]
+        return paused, timer
 
     def get_map_stats(self) -> dict[str, tuple[int, int]]:
         """``label -> (current, max)`` for the known interactables."""

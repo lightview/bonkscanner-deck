@@ -20,6 +20,7 @@ import decky
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "py_modules"))
 import bonk_deck  # noqa: E402
 import deck_buttons  # noqa: E402
+import overlay_control  # noqa: E402
 
 SETTINGS_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
 # Every evaluated map, for reroll odds. Same columns as BonkScanner for Windows.
@@ -40,6 +41,7 @@ DEFAULT_SETTINGS = {
     "near_miss_stat": "Moais",
     "near_miss_minimum": 8,
     "near_miss_seconds": 10,
+    "show_overlay": True,
 }
 INT_LIMITS = {
     "moai": (0, 20), "shady": (0, 20), "sm_total": (0, 40), "micro": (0, 2),
@@ -128,6 +130,11 @@ class Plugin:
         self.settings = self._load_settings()
         self.update_info = None
         self.update_checked_at = 0.0
+        self.overlay = overlay_control.OverlayController(
+            user=getattr(decky, "DECKY_USER", "deck") or "deck",
+            log=decky.logger.info,
+            open_game_clock=self._open_game_clock,
+        )
         self.hotkey_listener = deck_buttons.BackButtonListener(
             get_hotkey=lambda: self.settings["hotkey"],
             on_press=self._on_hotkey,
@@ -139,11 +146,13 @@ class Plugin:
     async def _unload(self):
         self.hotkey_listener.stop()
         self._stop_and_join()
+        self.overlay.close()
         decky.logger.info("BonkScanner Deck unloaded")
 
     async def _uninstall(self):
         self.hotkey_listener.stop()
         self._stop_and_join()
+        self.overlay.close()
 
     # -- settings ---------------------------------------------------------------
     def _load_settings(self) -> dict:
@@ -200,6 +209,19 @@ class Plugin:
     def _is_running(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
 
+    def _on_scanner_status(self, status: dict) -> None:
+        if self.settings["show_overlay"]:
+            try:
+                self.overlay.on_status(status)
+            except Exception as exc:  # the card is optional; never stop a hunt for it
+                decky.logger.info(f"Overlay update failed: {exc}")
+
+    @staticmethod
+    def _open_game_clock():
+        """A pause/run-timer reader for the result card, or None without a game."""
+        memory = bonk_deck.ProcessMemory()
+        return bonk_deck.GameClient(memory).get_clock
+
     def _emit(self, event: str, *args) -> None:
         asyncio.run_coroutine_threadsafe(decky.emit(event, *args), self.loop)
 
@@ -237,8 +259,10 @@ class Plugin:
             } if s["near_miss_enabled"] else None,
             wait_for_keep=deck_buttons.wait_for_any_button,
             on_event=lambda name, status: self._emit(f"bonk_{name}", status),
+            on_status=self._on_scanner_status,
             log_fn=self._log,
         )
+        self.overlay.new_hunt()
         self.thread = threading.Thread(target=self._worker, args=(self.scanner,),
                                        name="BonkScannerDeck", daemon=True)
         self.thread.start()
@@ -250,6 +274,8 @@ class Plugin:
             decky.logger.exception("Scanner crashed")
             result = dict(scanner.snapshot(), state="error", message=f"Unexpected error: {exc}")
         self.last_status = result
+        if self.settings["show_overlay"]:
+            self.overlay.on_finished(result)
         self._emit("bonk_finished", result)
 
     async def stop_scan(self) -> dict:

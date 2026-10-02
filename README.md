@@ -62,7 +62,14 @@ ever taken from this repository's releases, and only when you press the button.
 4. When a matching map is found the game is paused and a notification pops up.
    Open the plugin and press **Stop** any time to stop early.
 
-While rerolling the plugin panel shows the closest map so far (each condition
+While rerolling, a card in the top-right corner of the screen shows the hunt
+live — rerolls, time, the closest map so far and the odds — then the near-miss
+prompt or the result, which stays until you unpause and closes 5 s later.
+It is drawn by gamescope as an overlay, so input stays with the game; Steam's
+performance overlay is hidden while the card is up (*Options → On-screen card*
+turns it off).
+
+The plugin panel also shows the closest map so far (each condition
 green when met) and the odds estimated from every map recorded so far:
 `~1 in 508 · 50% by 6:23 · 90% by 21:14`.
 

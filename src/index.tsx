@@ -28,6 +28,7 @@ interface Settings {
   near_miss_stat: string;
   near_miss_minimum: number;
   near_miss_seconds: number;
+  show_overlay: boolean;
 }
 
 interface MapSummary {
@@ -366,6 +367,14 @@ function Content() {
             rgOptions={HOTKEY_OPTIONS}
             selectedOption={settings.hotkey}
             onChange={(option) => update({ hotkey: option.data as string })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="On-screen card"
+            description="Live progress over the game. Hides Steam's performance overlay while shown."
+            checked={settings.show_overlay}
+            onChange={(value: boolean) => update({ show_overlay: value })}
           />
         </PanelSectionRow>
         <PanelSectionRow>
