@@ -50,6 +50,17 @@ a virtual keyboard require it.
 4. When a matching map is found the game is paused and a notification pops up.
    Open the plugin and press **Stop** any time to stop early.
 
+While rerolling the plugin panel shows the closest map so far (each condition
+green when met) and the odds estimated from every map recorded so far:
+`~1 in 508 · 50% by 6:23 · 90% by 21:14`.
+
+**Near miss** (optional): if one chosen counter reaches a value — say Moais ≥ 8 —
+on a map that does not match the full target, rerolling holds for a few seconds
+and a notification asks you to press any button to keep that map.
+
+Every evaluated map is appended to `~/homebrew/data/bonkscanner-deck/map_rolls.csv`
+(same columns as BonkScanner for Windows), which is what the odds come from.
+
 Notes:
 
 - The current map is checked first; if it already matches nothing is touched.

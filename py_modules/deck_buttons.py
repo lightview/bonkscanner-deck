@@ -132,3 +132,59 @@ class BackButtonListener:
             was_down = down
         if fd is not None:
             os.close(fd)
+
+
+# Every physical button, by report byte -- hid-steam.c's Deck layout. Steam
+# (9.5) and Quick Access (14.2) are left out: they open Steam's own overlays,
+# so pressing them is not an answer to our prompt. Touch-only bits (trackpad
+# and stick capacitive sensors) are left out too, or a resting thumb would
+# count as a press.
+ANY_BUTTON_MASK = {
+    8: 0xFF,   # R2, L2, R1, L1, Y, B, X, A
+    9: 0xDF,   # D-pad, View, Menu, L5 (not Steam)
+    10: 0x47,  # R5, left/right pad click, L3
+    11: 0x04,  # R3
+    13: 0x06,  # L4, R4
+}
+
+
+def _pressed_bits(report: bytes) -> dict[int, int]:
+    return {byte: report[byte] & mask for byte, mask in ANY_BUTTON_MASK.items()}
+
+
+def wait_for_any_button(seconds: float, should_abort: Callable[[], bool]) -> bool:
+    """True when a button goes down within ``seconds``; False on timeout.
+
+    Buttons already held when the wait starts count only once released and
+    pressed again. Without a readable controller this just waits it out.
+    """
+    deadline = time.monotonic() + seconds
+    fd = _open_input_node()
+    if fd is None:
+        while time.monotonic() < deadline and not should_abort():
+            time.sleep(0.05)
+        return False
+    try:
+        held: dict[int, int] | None = None
+        while time.monotonic() < deadline:
+            if should_abort():
+                return False
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if not ready:
+                continue
+            try:
+                report = os.read(fd, 64)
+            except OSError:
+                return False
+            if len(report) < 16 or report[2] != DECK_INPUT_REPORT:
+                continue
+            bits = _pressed_bits(report)
+            if held is None:
+                held = bits
+                continue
+            if any(bits[byte] & ~held[byte] for byte in bits):
+                return True
+            held = {byte: held[byte] & bits[byte] for byte in bits}  # released keys re-arm
+        return False
+    finally:
+        os.close(fd)

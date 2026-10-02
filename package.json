@@ -1,6 +1,6 @@
 {
   "name": "bonkscanner-deck",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Megabonk map reroll automation for Steam Deck, ported from BonkScanner",
   "type": "module",
   "scripts": {

@@ -25,6 +25,7 @@ import csv
 import fcntl
 import glob
 import json
+import math
 import os
 import re
 import struct
@@ -456,6 +457,84 @@ def format_stats(stats: dict[str, int]) -> str:
             f"Magnet {stats.get('Magnet Shrines', 0)} | Chall {stats.get('Challenges', 0)}")
 
 
+NEAR_MISS_STATS = ("Moais", "Shady Guy", "S+M", "Microwaves", "Boss Curses",
+                   "Magnet Shrines", "Challenges")
+
+
+def stat_value(stats: dict[str, int], stat: str) -> int:
+    if stat == "S+M":
+        return stats.get("Shady Guy", 0) + stats.get("Moais", 0)
+    return int(stats.get(stat, 0) or 0)
+
+
+def closeness(stats: dict[str, int], template: dict) -> dict:
+    """How far ``stats`` is from ``template``: one point per missing unit.
+
+    Same rules as :func:`template_matches` (and BonkScanner's
+    ``app/hunt_progress.py``); a shortfall of 0 is a match.
+    """
+    values = {key: stats.get(label, 0) for key, label in COUNTERS}
+    values["micro"] = template_microwaves(stats)
+    requirements, shortfall = [], 0
+    sm_total = template.get("sm_total") or 0
+    if sm_total > 0:
+        value = stat_value(stats, "S+M")
+        requirements.append({"label": "S+M", "value": value, "target": f"{sm_total}+", "met": value >= sm_total})
+        shortfall += max(0, sm_total - value)
+    for key, label in COUNTERS:
+        value, minimum, maximum = values[key], template.get(key) or 0, template.get(f"{key}_max")
+        if minimum > 0:
+            requirements.append({"label": label, "value": value, "target": f"{minimum}+", "met": value >= minimum})
+            shortfall += max(0, minimum - value)
+        if maximum is not None:
+            requirements.append({"label": label, "value": value, "target": f"<={maximum}", "met": value <= maximum})
+            shortfall += max(0, value - maximum)
+    return {"shortfall": shortfall, "requirements": requirements}
+
+
+def is_closer(candidate: dict, best: dict | None) -> bool:
+    if best is None:
+        return True
+    if candidate["shortfall"] != best["shortfall"]:
+        return candidate["shortfall"] < best["shortfall"]
+
+    def met(c):
+        return sum(1 for r in c["requirements"] if r["met"])
+
+    return met(candidate) > met(best)
+
+
+def odds_summary(hits: int, maps: int, cycle_seconds: float) -> dict:
+    """Jeffreys estimate of p and the geometric 50 % / 90 % waits."""
+    p = min((hits + 0.5) / (maps + 1), 0.999999)
+
+    def rerolls(confidence):
+        return math.log(1 - confidence) / math.log(1 - p)
+
+    return {
+        "maps": maps, "hits": hits, "one_in": round(1 / p, 1), "reliable": maps >= 30,
+        "p50_seconds": round(rerolls(0.5) * cycle_seconds, 1),
+        "p90_seconds": round(rerolls(0.9) * cycle_seconds, 1),
+    }
+
+
+def load_map_rolls(path: str) -> list[dict]:
+    """``[{"map_kind", "stats", "cycle_seconds"}]`` from a map_rolls.csv."""
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as handle:
+            for raw in csv.DictReader(handle):
+                try:
+                    stats = {label: int(raw[column]) for label, column in ROLL_STAT_COLUMNS}
+                    cycle = float(raw["cycle_seconds"]) if raw.get("cycle_seconds") else None
+                except (KeyError, TypeError, ValueError):
+                    continue
+                rows.append({"map_kind": raw.get("map_kind", ""), "stats": stats, "cycle_seconds": cycle})
+    except OSError:
+        pass
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Virtual keyboard (replaces infra/keyboard_run_control.py)
 # ---------------------------------------------------------------------------
@@ -613,6 +692,9 @@ class Scanner:
                  max_rerolls: int = 0, force: bool = False, pause: bool = True,
                  skip_current: bool = False, start_delay: float = 0.0,
                  roll_log_path: str | None = None,
+                 near_miss: dict | None = None,
+                 wait_for_keep: Callable[[float, Callable[[], bool]], bool] | None = None,
+                 on_event: Callable[[str, dict], None] | None = None,
                  log_fn: Callable[[str], None] = log,
                  on_status: Callable[[dict], None] | None = None) -> None:
         self.template = template
@@ -626,6 +708,18 @@ class Scanner:
         self.roll_log_path = roll_log_path
         self._roll_log_failed = False
         self._last_eval_at: float | None = None
+        # near_miss = {"stat", "minimum", "seconds"}; wait_for_keep(seconds,
+        # should_abort) blocks until the player asks to keep the map (True)
+        # or the time runs out (False).
+        self.near_miss = near_miss
+        self._wait_for_keep = wait_for_keep
+        self._on_event = on_event
+        self._hunt_seconds = 0.0
+        self._hunt_cycles = 0
+        self._best: dict | None = None
+        self._odds_kind: str | None = None
+        self._odds_counts = [0, 0]  # hits, maps
+        self._history_cycle: float | None = None
         self._log = log_fn
         self._on_status = on_status
         self._stop = threading.Event()
@@ -634,6 +728,7 @@ class Scanner:
         self.status: dict = {
             "state": "idle", "message": "", "rerolls": 0, "elapsed": 0.0,
             "last": None, "found": None, "target": describe_template(template),
+            "closest": None, "odds": None, "near_miss": None,
         }
 
     # -- control -------------------------------------------------------------
@@ -643,8 +738,8 @@ class Scanner:
     def snapshot(self) -> dict:
         with self._lock:
             status = dict(self.status)
-        if self._started_at is not None and status["state"] in ("scanning", "waiting_unpause"):
-            status["elapsed"] = round(time.monotonic() - self._started_at, 1)
+        if self._started_at is not None and status["state"] in ("scanning", "waiting_unpause", "near_miss"):
+            status["elapsed"] = round(self._hunt_seconds, 1)
         return status
 
     def _set(self, **changes) -> None:
@@ -661,19 +756,78 @@ class Scanner:
         if self._stop.is_set():
             raise ScanStopped()
 
-    def _record_roll(self, stats: dict[str, int], state: MapState, matched: bool) -> None:
+    def _record_roll(self, stats: dict[str, int], state: MapState, matched: bool, rerolls: int) -> None:
         now = time.monotonic()
         cycle = now - self._last_eval_at if self._last_eval_at is not None else None
         self._last_eval_at = now
-        if not self.roll_log_path or self._roll_log_failed:
+        if cycle is not None:
+            self._hunt_seconds += cycle
+            self._hunt_cycles += 1
+        near = closeness(stats, self.template)
+        if not matched and is_closer(near, self._best):
+            self._best = dict(near, at=rerolls, map=summarize_stats(stats))
+        if self.roll_log_path and not self._roll_log_failed:
+            try:
+                append_map_roll(self.roll_log_path, stats, map_seed=state.map_seed,
+                                stage_index=state.stage_index, cycle_seconds=cycle,
+                                matched="target" if matched else "")
+            except OSError as exc:
+                self._roll_log_failed = True
+                self._log(f"[!] Map statistics could not be written to {self.roll_log_path}: {exc}")
+        self._update_odds(stats, matched)
+        self._set(closest=self._best, elapsed=round(self._hunt_seconds, 1))
+
+    def _cycle_estimate(self) -> float:
+        if self._hunt_cycles >= 5:
+            return self._hunt_seconds / self._hunt_cycles
+        return self._history_cycle or 1.85
+
+    def _update_odds(self, stats: dict[str, int], matched: bool) -> None:
+        if not self.roll_log_path:
             return
-        try:
-            append_map_roll(self.roll_log_path, stats, map_seed=state.map_seed,
-                            stage_index=state.stage_index, cycle_seconds=cycle,
-                            matched="target" if matched else "")
-        except OSError as exc:
-            self._roll_log_failed = True
-            self._log(f"[!] Map statistics could not be written to {self.roll_log_path}: {exc}")
+        kind = "graveyard" if stats.get("Chests", 0) >= 69 else "forest_or_desert"
+        if kind != self._odds_kind:
+            # Recount once per hunt and map kind; the file already holds this map.
+            self._odds_kind = kind
+            rows = load_map_rolls(self.roll_log_path)
+            same = [row for row in rows if row["map_kind"] == kind]
+            self._odds_counts = [sum(1 for row in same if template_matches(row["stats"], self.template)), len(same)]
+            if self._roll_log_failed:  # this map never reached the file
+                self._odds_counts[0] += int(matched)
+                self._odds_counts[1] += 1
+            cycles = sorted(row["cycle_seconds"] for row in rows if row["cycle_seconds"])
+            self._history_cycle = cycles[len(cycles) // 2] if cycles else None
+        else:
+            self._odds_counts[0] += int(matched)
+            self._odds_counts[1] += 1
+        hits, maps = self._odds_counts
+        self._set(odds=odds_summary(hits, maps, self._cycle_estimate()))
+
+    def _hold_near_miss(self, stats: dict[str, int]) -> bool:
+        """Hold a near-miss map; True when the player keeps it (or stops the scan)."""
+        rule = self.near_miss
+        if not rule or self._wait_for_keep is None:
+            return False
+        stat, minimum, seconds = rule["stat"], int(rule["minimum"]), float(rule["seconds"])
+        value = stat_value(stats, stat)
+        if value < minimum:
+            return False
+        info = {"stat": stat, "value": value, "minimum": minimum, "seconds": seconds,
+                "map": summarize_stats(stats)}
+        self._log(f"[?] Near miss: {stat} {value} (>= {minimum}). Press any button within {seconds:.0f} s to keep it.")
+        self._set(state="near_miss", near_miss=info,
+                  message=f"Near miss: {stat} {value}. Press any button to keep this map.")
+        if self._on_event is not None:
+            self._on_event("near_miss", self.snapshot())
+        started = time.monotonic()
+        kept = bool(self._wait_for_keep(seconds, self._stop.is_set)) or self._stop.is_set()
+        if kept:
+            return True
+        self._log("[*] No button pressed; rerolling on.")
+        if self._last_eval_at is not None:
+            self._last_eval_at += time.monotonic() - started  # the hold is not hunting
+        self._set(state="scanning", near_miss=None, message="")
+        return False
 
     # -- loop ----------------------------------------------------------------
     def _connect(self) -> ProcessMemory:
@@ -765,7 +919,7 @@ class Scanner:
                 stats = {label: maximum for label, (_current, maximum) in raw.items()}
                 summary = summarize_stats(stats)
                 matched = template_matches(stats, self.template)
-                self._record_roll(stats, last_state, matched)
+                self._record_roll(stats, last_state, matched, rerolls)
 
                 if matched and rerolls == 0 and not self.skip_current:
                     # Evaluated while still in the pause menu if the player was
@@ -777,7 +931,7 @@ class Scanner:
                               message="The current map already matches.")
                     return self.snapshot()
                 if matched and rerolls > 0:
-                    elapsed = time.monotonic() - self._started_at
+                    elapsed = self._hunt_seconds
                     self._log(f"[$$$] TARGET MAP FOUND after {rerolls} rerolls ({elapsed:.0f}s): "
                               f"{format_stats(stats)}")
                     if self.pause:
@@ -790,6 +944,12 @@ class Scanner:
 
                 self._log(f"#{rerolls:<5} {format_stats(stats)}")
                 self._set(last=summary, rerolls=rerolls)
+                if self._hold_near_miss(stats):
+                    self._log(f"[$$$] Near-miss map kept after {rerolls} rerolls: {format_stats(stats)}")
+                    self._set(state="kept", found=summary, near_miss=None,
+                              elapsed=round(self._hunt_seconds, 1),
+                              message=f"Map kept after {rerolls} rerolls.")
+                    return self.snapshot()
 
                 if last_state.stage_index not in (None, 0) and not self.force:
                     raise ScanError("The run moved past stage 1; stopping instead of resetting it.")

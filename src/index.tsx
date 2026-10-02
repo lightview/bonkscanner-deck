@@ -24,6 +24,10 @@ interface Settings {
   skip_current: boolean;
   start_delay: number;
   hotkey: string;
+  near_miss_enabled: boolean;
+  near_miss_stat: string;
+  near_miss_minimum: number;
+  near_miss_seconds: number;
 }
 
 interface MapSummary {
@@ -35,7 +39,40 @@ interface MapSummary {
   challenges: number;
 }
 
+interface Requirement {
+  label: string;
+  value: number;
+  target: string;
+  met: boolean;
+}
+
+interface Closest {
+  shortfall: number;
+  requirements: Requirement[];
+  at: number;
+}
+
+interface Odds {
+  maps: number;
+  hits: number;
+  one_in: number;
+  reliable: boolean;
+  p50_seconds: number;
+  p90_seconds: number;
+}
+
+interface NearMiss {
+  stat: string;
+  value: number;
+  minimum: number;
+  seconds: number;
+  map: MapSummary;
+}
+
 interface Status {
+  closest: Closest | null;
+  odds: Odds | null;
+  near_miss: NearMiss | null;
   state: string;
   message: string;
   rerolls: number;
@@ -58,7 +95,16 @@ const HOTKEY_OPTIONS = ["off", "L4", "R4", "L5", "R5", "L4+R4", "L5+R5"].map((va
   label: value === "off" ? "Off" : value,
 }));
 
+const NEAR_MISS_STATS = ["Moais", "Shady Guy", "S+M", "Microwaves", "Boss Curses", "Magnet Shrines", "Challenges"].map(
+  (value) => ({ data: value, label: value }),
+);
+
+const MET = "#6FD38A";
+const UNMET = "#F2A65A";
+
 const STATE_TEXT: Record<string, string> = {
+  near_miss: "Near miss - press any button to keep",
+  kept: "Map kept",
   idle: "Ready",
   waiting_game: "Waiting for Megabonk...",
   starting: "Starting...",
@@ -82,6 +128,27 @@ function formatDuration(seconds: number): string {
 function formatMap(map: MapSummary | null): string {
   if (!map) return "-";
   return `Moai ${map.moai} · Shady ${map.shady} · Micro ${map.micro} · Boss ${map.boss} · Magnet ${map.magnet} · Chall ${map.challenges}`;
+}
+
+function ClosestRow({ closest }: { closest: Closest }) {
+  return (
+    <div style={{ fontSize: "12px" }}>
+      Closest (#{closest.at}):{" "}
+      {closest.requirements.map((r, i) => (
+        <span key={i} style={{ color: r.met ? MET : UNMET }}>
+          {i > 0 ? " · " : ""}
+          {r.label} <b>{r.value}</b>/{r.target}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function oddsText(odds: Odds): string {
+  if (!odds.reliable) return `Odds: collecting data (${odds.maps} maps recorded)`;
+  return `Odds ~1 in ${Math.round(odds.one_in)} · 50% by ${formatDuration(odds.p50_seconds)} · 90% by ${formatDuration(
+    odds.p90_seconds,
+  )} (${odds.hits}/${odds.maps} maps)`;
 }
 
 function Content() {
@@ -149,6 +216,16 @@ function Content() {
         {status?.message ? (
           <PanelSectionRow>
             <div style={{ fontSize: "12px", opacity: 0.8 }}>{status.message}</div>
+          </PanelSectionRow>
+        ) : null}
+        {status?.closest && status.closest.requirements.length && !status.found ? (
+          <PanelSectionRow>
+            <ClosestRow closest={status.closest} />
+          </PanelSectionRow>
+        ) : null}
+        {status?.odds ? (
+          <PanelSectionRow>
+            <div style={{ fontSize: "11px", opacity: 0.75 }}>{oddsText(status.odds)}</div>
           </PanelSectionRow>
         ) : null}
         {status?.found || status?.last ? (
@@ -226,6 +303,55 @@ function Content() {
         {slider("start_delay", "Start delay (seconds)", 10)}
       </PanelSection>
 
+      <PanelSection title="Near miss">
+        <PanelSectionRow>
+          <ToggleField
+            label="Hold near-miss maps"
+            description="If one counter reaches the value, wait so you can keep the map with any button."
+            checked={settings.near_miss_enabled}
+            disabled={running}
+            onChange={(value: boolean) => update({ near_miss_enabled: value })}
+          />
+        </PanelSectionRow>
+        {settings.near_miss_enabled ? (
+          <>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Counter"
+                rgOptions={NEAR_MISS_STATS}
+                selectedOption={settings.near_miss_stat}
+                disabled={running}
+                onChange={(option) => update({ near_miss_stat: option.data as string })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <SliderField
+                label="At least"
+                value={settings.near_miss_minimum}
+                min={1}
+                max={15}
+                step={1}
+                showValue
+                disabled={running}
+                onChange={(value: number) => update({ near_miss_minimum: value })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <SliderField
+                label="Hold (seconds)"
+                value={settings.near_miss_seconds}
+                min={3}
+                max={30}
+                step={1}
+                showValue
+                disabled={running}
+                onChange={(value: number) => update({ near_miss_seconds: value })}
+              />
+            </PanelSectionRow>
+          </>
+        ) : null}
+      </PanelSection>
+
       {status?.log?.length ? (
         <PanelSection title="Log">
           <PanelSectionRow>
@@ -242,7 +368,13 @@ function Content() {
 export default definePlugin(() => {
   // Registered at plugin level so the toast fires while the menu is closed.
   const listener = addEventListener<[status: Status]>("bonk_finished", (status) => {
-    if (status.state === "found" || status.state === "already_matches") {
+    if (status.state === "kept") {
+      toaster.toast({
+        title: "BonkScanner: map kept",
+        body: `${status.rerolls} rerolls in ${formatDuration(status.elapsed)} · ${formatMap(status.found)}`,
+        duration: 8000,
+      });
+    } else if (status.state === "found" || status.state === "already_matches") {
       toaster.toast({
         title: "BonkScanner: target map found!",
         body: `${status.rerolls} rerolls in ${formatDuration(status.elapsed)} · ${formatMap(status.found)}`,
@@ -251,6 +383,16 @@ export default definePlugin(() => {
     } else if (status.state === "error") {
       toaster.toast({ title: "BonkScanner: stopped", body: status.message });
     }
+  });
+
+  const nearMissListener = addEventListener<[status: Status]>("bonk_near_miss", (status) => {
+    const near = status.near_miss;
+    if (!near) return;
+    toaster.toast({
+      title: `Near miss! ${near.stat} ${near.value} (≥${near.minimum})`,
+      body: `Press any button within ${near.seconds} s to keep this map.`,
+      duration: near.seconds * 1000,
+    });
   });
 
   const hotkeyListener = addEventListener<[action: string, hotkey: string]>("bonk_hotkey", (action, hotkey) => {
@@ -269,6 +411,7 @@ export default definePlugin(() => {
     onDismount() {
       removeEventListener("bonk_finished", listener);
       removeEventListener("bonk_hotkey", hotkeyListener);
+      removeEventListener("bonk_near_miss", nearMissListener);
     },
   };
 });

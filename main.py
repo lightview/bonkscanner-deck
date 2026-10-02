@@ -33,10 +33,15 @@ DEFAULT_SETTINGS = {
     "skip_current": False,
     "start_delay": 3,
     "hotkey": "R4",
+    "near_miss_enabled": False,
+    "near_miss_stat": "Moais",
+    "near_miss_minimum": 8,
+    "near_miss_seconds": 10,
 }
 INT_LIMITS = {
     "moai": (0, 20), "shady": (0, 20), "sm_total": (0, 40), "micro": (0, 2),
     "boss": (0, 20), "challenges": (0, 20), "magnet_max": (-1, 20), "start_delay": (0, 10),
+    "near_miss_minimum": (1, 30), "near_miss_seconds": (3, 60),
 }
 LOG_LINES = 6
 
@@ -51,6 +56,9 @@ def _sanitize(raw: dict) -> dict:
             settings[key] = bool(value)
         elif key == "hotkey":
             if value in deck_buttons.HOTKEYS:
+                settings[key] = value
+        elif key == "near_miss_stat":
+            if value in bonk_deck.NEAR_MISS_STATS:
                 settings[key] = value
         else:
             low, high = INT_LIMITS[key]
@@ -155,6 +163,13 @@ class Plugin:
             skip_current=s["skip_current"],
             start_delay=start_delay,
             roll_log_path=MAP_ROLLS_FILE,
+            near_miss={
+                "stat": s["near_miss_stat"],
+                "minimum": s["near_miss_minimum"],
+                "seconds": s["near_miss_seconds"],
+            } if s["near_miss_enabled"] else None,
+            wait_for_keep=deck_buttons.wait_for_any_button,
+            on_event=lambda name, status: self._emit(f"bonk_{name}", status),
             log_fn=self._log,
         )
         self.thread = threading.Thread(target=self._worker, args=(self.scanner,),
