@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import ssl
 import sys
 import threading
 import time
@@ -63,12 +64,26 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", version or "")[:3])
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Decky's bundled Python does not see the system CA store. Use the
+    certifi bundle Decky ships (what Decky itself uses), else the system file."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    for cafile in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"):
+        if os.path.exists(cafile):
+            return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
 def _http_get(url: str, *, limit: int = 1_000_000) -> bytes:
     request = urllib.request.Request(url, headers={
         "User-Agent": "bonkscanner-deck-updater",
         "Accept": "application/vnd.github+json",
     })
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=10, context=_ssl_context()) as response:
         return response.read(limit)
 
 
