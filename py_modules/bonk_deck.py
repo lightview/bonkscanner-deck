@@ -21,6 +21,7 @@ Standard library only. Needs root:
 from __future__ import annotations
 
 import argparse
+import csv
 import fcntl
 import glob
 import json
@@ -30,6 +31,7 @@ import struct
 import sys
 import threading
 import time
+from datetime import datetime
 from typing import Callable
 
 PROCESS_NAME = "megabonk.exe"
@@ -560,6 +562,43 @@ def resolve_hold_duration(log_fn: Callable[[str], None] = log) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Map roll statistics -- same columns as BonkScanner's app/map_roll_log.py
+# ---------------------------------------------------------------------------
+ROLL_STAT_COLUMNS = (
+    ("Moais", "moais"), ("Shady Guy", "shady"), ("Microwaves", "microwaves"),
+    ("Boss Curses", "boss_curses"), ("Magnet Shrines", "magnet_shrines"),
+    ("Challenges", "challenges"), ("Chests", "chests"), ("Pots", "pots"),
+    ("Charge Shrines", "charge_shrines"), ("Greed Shrines", "greed_shrines"),
+    ("Bald Heads", "bald_heads"),
+)
+ROLL_FIELDS = ("timestamp", "source", "map_kind", "stage_index", "map_seed",
+               *(column for _label, column in ROLL_STAT_COLUMNS), "cycle_seconds", "matched")
+
+
+def append_map_roll(path: str, stats: dict[str, int], *, map_seed=None, stage_index=None,
+                    cycle_seconds: float | None = None, matched: str = "") -> None:
+    """One row per evaluated map; raises OSError for the caller to report once."""
+    row = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "source": "deck",
+        "map_kind": "graveyard" if stats.get("Chests", 0) >= 69 else "forest_or_desert",
+        "stage_index": "" if stage_index is None else stage_index,
+        "map_seed": "" if map_seed is None else map_seed,
+        "cycle_seconds": "" if cycle_seconds is None else f"{cycle_seconds:.2f}",
+        "matched": matched,
+    }
+    for label, column in ROLL_STAT_COLUMNS:
+        row[column] = int(stats.get(label, 0) or 0)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    new_file = not os.path.exists(path) or os.path.getsize(path) == 0
+    with open(path, "a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=ROLL_FIELDS)
+        if new_file:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+# ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
 class Scanner:
@@ -573,6 +612,7 @@ class Scanner:
     def __init__(self, template: dict, *, key: str = "r", hold: float | None = None,
                  max_rerolls: int = 0, force: bool = False, pause: bool = True,
                  skip_current: bool = False, start_delay: float = 0.0,
+                 roll_log_path: str | None = None,
                  log_fn: Callable[[str], None] = log,
                  on_status: Callable[[dict], None] | None = None) -> None:
         self.template = template
@@ -583,6 +623,9 @@ class Scanner:
         self.pause = pause
         self.skip_current = skip_current
         self.start_delay = start_delay
+        self.roll_log_path = roll_log_path
+        self._roll_log_failed = False
+        self._last_eval_at: float | None = None
         self._log = log_fn
         self._on_status = on_status
         self._stop = threading.Event()
@@ -617,6 +660,20 @@ class Scanner:
     def _check_stop(self) -> None:
         if self._stop.is_set():
             raise ScanStopped()
+
+    def _record_roll(self, stats: dict[str, int], state: MapState, matched: bool) -> None:
+        now = time.monotonic()
+        cycle = now - self._last_eval_at if self._last_eval_at is not None else None
+        self._last_eval_at = now
+        if not self.roll_log_path or self._roll_log_failed:
+            return
+        try:
+            append_map_roll(self.roll_log_path, stats, map_seed=state.map_seed,
+                            stage_index=state.stage_index, cycle_seconds=cycle,
+                            matched="target" if matched else "")
+        except OSError as exc:
+            self._roll_log_failed = True
+            self._log(f"[!] Map statistics could not be written to {self.roll_log_path}: {exc}")
 
     # -- loop ----------------------------------------------------------------
     def _connect(self) -> ProcessMemory:
@@ -699,6 +756,7 @@ class Scanner:
                     self._log("[-] Map took too long to load; re-evaluating the current map.")
                     self._log(f"    {exc}")
                     is_first, last_state, last_stats = True, None, None
+                    self._last_eval_at = None
                     continue
 
                 is_first = False
@@ -707,6 +765,7 @@ class Scanner:
                 stats = {label: maximum for label, (_current, maximum) in raw.items()}
                 summary = summarize_stats(stats)
                 matched = template_matches(stats, self.template)
+                self._record_roll(stats, last_state, matched)
 
                 if matched and rerolls == 0 and not self.skip_current:
                     # Evaluated while still in the pause menu if the player was
@@ -714,7 +773,7 @@ class Scanner:
                     self._log(f"[$$$] The current map already matches: {format_stats(stats)}")
                     if self.pause and not client.is_paused():
                         keyboard.hold("esc", 0.05)
-                    self._set(state="already_matches", last=summary, found=summary,
+                    self._set(state="already_matches", last=summary, found=summary, elapsed=0.0,
                               message="The current map already matches.")
                     return self.snapshot()
                 if matched and rerolls > 0:
@@ -815,6 +874,8 @@ def main() -> None:
     parser.add_argument("--no-pause", action="store_true", help="do not press Esc when the target is found")
     parser.add_argument("--skip-current", action="store_true",
                         help="reroll even if the current map already matches")
+    parser.add_argument("--log-rolls", metavar="CSV", default=None,
+                        help="append every evaluated map to this CSV file")
     args = parser.parse_args()
 
     if sys.platform != "linux":
@@ -831,7 +892,8 @@ def main() -> None:
         template[key] = getattr(args, key)
         template[f"{key}_max"] = getattr(args, f"{key}_max")
     scanner = Scanner(template, key=args.key, hold=args.hold, max_rerolls=args.max_rerolls,
-                      force=args.force, pause=not args.no_pause, skip_current=args.skip_current)
+                      force=args.force, pause=not args.no_pause, skip_current=args.skip_current,
+                      roll_log_path=args.log_rolls)
     try:
         scanner.run()
     except KeyboardInterrupt:

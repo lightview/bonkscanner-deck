@@ -19,6 +19,8 @@ import bonk_deck  # noqa: E402
 import deck_buttons  # noqa: E402
 
 SETTINGS_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+# Every evaluated map, for reroll odds. Same columns as BonkScanner for Windows.
+MAP_ROLLS_FILE = os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "map_rolls.csv")
 DEFAULT_SETTINGS = {
     "moai": 4,
     "shady": 0,
@@ -152,6 +154,7 @@ class Plugin:
             pause=s["pause_on_found"],
             skip_current=s["skip_current"],
             start_delay=start_delay,
+            roll_log_path=MAP_ROLLS_FILE,
             log_fn=self._log,
         )
         self.thread = threading.Thread(target=self._worker, args=(self.scanner,),

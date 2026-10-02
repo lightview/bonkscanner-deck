@@ -71,6 +71,14 @@ const STATE_TEXT: Record<string, string> = {
   error: "Error",
 };
 
+function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
+
 function formatMap(map: MapSummary | null): string {
   if (!map) return "-";
   return `Moai ${map.moai} · Shady ${map.shady} · Micro ${map.micro} · Boss ${map.boss} · Magnet ${map.magnet} · Chall ${map.challenges}`;
@@ -135,7 +143,7 @@ function Content() {
       <PanelSection title="Status">
         <PanelSectionRow>
           <Field label={STATE_TEXT[status?.state ?? "idle"] ?? status?.state} bottomSeparator="none">
-            {status && status.rerolls > 0 ? `${status.rerolls} rerolls${rate}` : ""}
+            {status && status.rerolls > 0 ? `${status.rerolls} rerolls · ${formatDuration(status.elapsed)}${rate}` : ""}
           </Field>
         </PanelSectionRow>
         {status?.message ? (
@@ -237,7 +245,8 @@ export default definePlugin(() => {
     if (status.state === "found" || status.state === "already_matches") {
       toaster.toast({
         title: "BonkScanner: target map found!",
-        body: `${status.rerolls} rerolls · ${formatMap(status.found)}`,
+        body: `${status.rerolls} rerolls in ${formatDuration(status.elapsed)} · ${formatMap(status.found)}`,
+        duration: 15000,
       });
     } else if (status.state === "error") {
       toaster.toast({ title: "BonkScanner: stopped", body: status.message });
