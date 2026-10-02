@@ -84,6 +84,24 @@ interface Status {
   log: string[];
 }
 
+interface UpdateInfo {
+  ok: boolean;
+  current: string;
+  version?: string;
+  url?: string;
+  sha256?: string;
+  page?: string;
+  available: boolean;
+  error?: string;
+}
+
+const PLUGIN_NAME = "BonkScanner Deck";
+// Decky's own installer, the one its store uses: it shows the confirmation
+// dialog, checks the SHA-256, replaces the plugin and reloads it. Settings and
+// recorded maps live outside the plugin folder and survive.
+const DECKY_INSTALL_TYPE_UPDATE = 2;
+
+const checkUpdate = callable<[force: boolean], UpdateInfo>("check_update");
 const getSettings = callable<[], Settings>("get_settings");
 const saveSettings = callable<[settings: Settings], Settings>("save_settings");
 const startScan = callable<[], Status>("start_scan");
@@ -149,6 +167,73 @@ function oddsText(odds: Odds): string {
   return `Odds ~1 in ${Math.round(odds.one_in)} · 50% by ${formatDuration(odds.p50_seconds)} · 90% by ${formatDuration(
     odds.p90_seconds,
   )} (${odds.hits}/${odds.maps} maps)`;
+}
+
+function UpdateSection() {
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    checkUpdate(false).then(setInfo).catch(() => undefined);
+  }, []);
+
+  const recheck = () => {
+    setBusy(true);
+    setNote("");
+    checkUpdate(true)
+      .then(setInfo)
+      .finally(() => setBusy(false));
+  };
+
+  const install = async () => {
+    if (!info?.available || !info.url || !info.sha256) return;
+    const backend = (window as any).DeckyBackend;
+    if (!backend?.call) {
+      setNote(`Use Decky > Developer > Install Plugin from URL: ${info.url}`);
+      return;
+    }
+    setBusy(true);
+    try {
+      await backend.call("utilities/install_plugin", info.url, PLUGIN_NAME, info.version, info.sha256, DECKY_INSTALL_TYPE_UPDATE);
+      setNote("Confirm the update in Decky's dialog.");
+    } catch (error) {
+      setNote(`Update failed: ${error}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let label = "Checking for updates...";
+  if (info?.available) label = `Update available: v${info.version}`;
+  else if (info?.ok) label = "Up to date";
+  else if (info) label = "Could not check for updates";
+
+  return (
+    <PanelSection title="Updates">
+      <PanelSectionRow>
+        <Field label={label} bottomSeparator="none">
+          {info ? `v${info.current}` : ""}
+        </Field>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        {info?.available ? (
+          <ButtonItem layout="below" disabled={busy} onClick={install}>
+            Update to v{info.version}
+          </ButtonItem>
+        ) : (
+          <ButtonItem layout="below" disabled={busy} onClick={recheck}>
+            Check again
+          </ButtonItem>
+        )}
+      </PanelSectionRow>
+      {note ? (
+        <PanelSectionRow>
+          <div style={{ fontSize: "11px", opacity: 0.75 }}>{note}</div>
+        </PanelSectionRow>
+      ) : null}
+    </PanelSection>
+  );
 }
 
 function Content() {
@@ -351,6 +436,8 @@ function Content() {
           </>
         ) : null}
       </PanelSection>
+
+      <UpdateSection />
 
       {status?.log?.length ? (
         <PanelSection title="Log">

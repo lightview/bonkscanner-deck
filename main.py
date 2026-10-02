@@ -9,8 +9,11 @@ frontend polls :meth:`Plugin.get_status` and gets a ``bonk_finished`` event.
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
+import time
+import urllib.request
 
 import decky
 
@@ -44,6 +47,49 @@ INT_LIMITS = {
     "near_miss_minimum": (1, 30), "near_miss_seconds": (3, 60),
 }
 LOG_LINES = 6
+
+# Updates come only from this repository's published releases. The plugin runs
+# as root, so the source is fixed here rather than read from anywhere else, and
+# installing is always the player's choice: Decky shows its own confirmation
+# and checks the zip's SHA-256 before replacing anything.
+UPDATE_REPO = "lightview/bonkscanner-deck"
+UPDATE_ASSET = "bonkscanner-deck.zip"
+UPDATE_CHECK_TTL = 15 * 60
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version or "")[:3])
+
+
+def _http_get(url: str, *, limit: int = 1_000_000) -> bytes:
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "bonkscanner-deck-updater",
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.read(limit)
+
+
+def fetch_latest_release() -> dict:
+    release = json.loads(_http_get(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"))
+    tag = str(release.get("tag_name", ""))
+    expected_url = f"https://github.com/{UPDATE_REPO}/releases/download/{tag}/{UPDATE_ASSET}"
+    assets = {asset.get("name"): asset for asset in release.get("assets", [])}
+    zip_asset = assets.get(UPDATE_ASSET)
+    if not tag or zip_asset is None or zip_asset.get("browser_download_url") != expected_url:
+        raise ValueError("The latest release has no plugin zip.")
+    digest = str(zip_asset.get("digest") or "")
+    sha256 = digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
+    if not sha256 and f"{UPDATE_ASSET}.sha256" in assets:
+        sha256 = _http_get(assets[f"{UPDATE_ASSET}.sha256"]["browser_download_url"], limit=200).decode().split()[0]
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
+        raise ValueError("The latest release has no SHA-256 for its zip.")
+    return {
+        "version": tag.lstrip("v"),
+        "url": expected_url,
+        "sha256": sha256,
+        "page": release.get("html_url") or f"https://github.com/{UPDATE_REPO}/releases",
+    }
 
 
 def _sanitize(raw: dict) -> dict:
@@ -80,6 +126,8 @@ class Plugin:
         self.last_status = {"state": "idle", "message": "", "rerolls": 0, "elapsed": 0.0,
                             "last": None, "found": None, "target": ""}
         self.settings = self._load_settings()
+        self.update_info = None
+        self.update_checked_at = 0.0
         self.hotkey_listener = deck_buttons.BackButtonListener(
             get_hotkey=lambda: self.settings["hotkey"],
             on_press=self._on_hotkey,
@@ -117,6 +165,25 @@ class Plugin:
         except OSError as exc:
             decky.logger.error(f"Could not save settings: {exc}")
         return self.settings
+
+    # -- updates ----------------------------------------------------------------
+    async def check_update(self, force: bool = False) -> dict:
+        """Compare this build with the latest GitHub release (cached 15 min)."""
+        current = decky.DECKY_PLUGIN_VERSION
+        now = time.monotonic()
+        if force or self.update_info is None or now - self.update_checked_at > UPDATE_CHECK_TTL:
+            try:
+                latest = await asyncio.get_running_loop().run_in_executor(None, fetch_latest_release)
+                self.update_info = {"ok": True, **latest}
+            except Exception as exc:
+                decky.logger.info(f"Update check failed: {exc}")
+                self.update_info = {"ok": False, "error": str(exc)}
+            self.update_checked_at = now
+        info = dict(self.update_info, current=current)
+        info["available"] = bool(
+            info.get("ok") and _version_tuple(info["version"]) > _version_tuple(current)
+        )
+        return info
 
     # -- scanning ---------------------------------------------------------------
     def _log(self, message: str) -> None:

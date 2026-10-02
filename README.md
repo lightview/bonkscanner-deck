@@ -39,6 +39,18 @@ a virtual keyboard require it.
 3. Megabonk должен запускаться через Proton (Свойства → Совместимость → Proton).
 4. В игре: начать забег, выставить условия в плагине, нажать **R4** (задняя кнопка) — пошли рестарты; ещё раз **R4** — стоп.
 
+## Updating
+
+From v0.3.0 on, the plugin checks this repository's latest release when you
+open it. If there is a newer one, **Updates → Update to vX** hands it to Decky's
+own installer: Decky asks for confirmation, checks the zip's SHA-256 and
+reloads the plugin. Your settings and recorded maps are kept. Updates are only
+ever taken from this repository's releases, and only when you press the button.
+
+**Обновление:** начиная с v0.3.0 в плагине есть раздел *Updates*. Если вышла
+новая версия, нажми *Update to vX* и подтверди в окне Decky. Настройки и
+накопленная статистика сохраняются.
+
 ## Use
 
 1. Start a run in Megabonk (stage 1).
